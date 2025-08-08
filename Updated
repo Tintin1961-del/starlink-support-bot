@@ -1,0 +1,148 @@
+from fastapi import FastAPI
+from pydantic import BaseModel
+import httpx
+import openai
+import os
+
+app = FastAPI()
+
+# === CONFIGURATION ===
+STARLINK_TOKEN_URL = "https://api.enterprise.starlink.com/oauth/token"
+STARLINK_API_BASE = "https://api.enterprise.starlink.com/v1"
+STARLINK_CLIENT_ID = os.getenv("STARLINK_CLIENT_ID")
+STARLINK_CLIENT_SECRET = os.getenv("STARLINK_CLIENT_SECRET")
+CHARGEBEE_API_KEY = os.getenv("CHARGEBEE_API_KEY")
+CHARGEBEE_SITE = os.getenv("CHARGEBEE_SITE")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
+
+class UserQuery(BaseModel):
+    user_id: str
+    message: str
+
+# === AUTH: Starlink Client Credentials ===
+async def get_starlink_access_token():
+    async with httpx.AsyncClient() as client:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": STARLINK_CLIENT_ID,
+            "client_secret": STARLINK_CLIENT_SECRET
+        }
+        response = await client.post(STARLINK_TOKEN_URL, data=data, headers=headers)
+        response.raise_for_status()
+        return response.json().get("access_token")
+
+# === API WRAPPERS ===
+async def get_starlink_status(user_id: str):
+    token = await get_starlink_access_token()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{STARLINK_API_BASE}/terminals/{user_id}/status",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        return resp.json()
+
+async def get_starlink_usage(user_id: str):
+    token = await get_starlink_access_token()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{STARLINK_API_BASE}/terminals/{user_id}/usage",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        return resp.json()
+
+async def get_chargebee_subscription(user_id: str):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://{CHARGEBEE_SITE}.chargebee.com/api/v2/customers/{user_id}/subscriptions",
+            auth=(CHARGEBEE_API_KEY, "")
+        )
+        return resp.json()
+
+async def ask_gpt(message: str, context: dict = {}):
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are a helpful support assistant for Starlink and billing."},
+            {"role": "user", "content": message},
+            *context.get("messages", [])
+        ]
+    )
+    return response.choices[0].message["content"]
+
+@app.post("/support")
+async def support_bot(query: UserQuery):
+    user_id = query.user_id
+    message = query.message.lower()
+
+    if "usage" in message or "how much data" in message:
+        usage = await get_starlink_usage(user_id)
+        reply = f"You've used {usage.get('data_used_gb', '?')} GB so far this billing period."
+
+    elif "offline" in message or "status" in message:
+        status = await get_starlink_status(user_id)
+        reply = f"Your terminal is currently {status.get('connection_state', 'unknown')}. Last ping was {status.get('last_contact_time', 'N/A')}"
+
+    elif "invoice" in message or "billing" in message:
+        subs = await get_chargebee_subscription(user_id)
+        plan = subs['list'][0]['subscription']['plan_id'] if subs['list'] else 'Unknown'
+        reply = f"You're currently subscribed to plan: {plan}."
+
+    else:
+        reply = await ask_gpt(message)
+
+    return {"reply": reply}
+# Starlink Support Bot (Render-Ready)
+
+This is a FastAPI backend for a support bot that integrates:
+- Starlink Enterprise API (OAuth2 client credentials)
+- Chargebee API (billing/subscription info)
+- OpenAI GPT-4o (for intelligent replies)
+
+## 🚀 How to Deploy to Render
+
+1. Upload this project to a GitHub repo.
+2. Go to https://render.com → New Web Service.
+3. Connect your GitHub repo.
+4. Set these environment variables under the 'Environment' tab:
+    - STARLINK_CLIENT_ID
+    - STARLINK_CLIENT_SECRET
+    - CHARGEBEE_API_KEY
+    - CHARGEBEE_SITE
+    - OPENAI_API_KEY
+5. Done! You'll get a live HTTPS endpoint like:
+   `https://your-app-name.onrender.com/support`
+
+## 🧪 Sample Request (POST to /support)
+```json
+{
+  "user_id": "your-terminal-id",
+  "message": "How much data have I used?"
+}
+```
+
+This will return real-time usage data via the Starlink Enterprise API.
+services:
+  - type: web
+    name: support-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: STARLINK_CLIENT_ID
+        sync: false
+      - key: STARLINK_CLIENT_SECRET
+        sync: false
+      - key: CHARGEBEE_API_KEY
+        sync: false
+      - key: CHARGEBEE_SITE
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+fastapi
+httpx
+openai
+uvicorn
+__pycache__/
+.env
